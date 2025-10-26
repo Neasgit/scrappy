@@ -1,0 +1,12 @@
+{
+  "name": "scrappy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "scrape": "node scrape-ionos.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.48.0"
+  }
+}
