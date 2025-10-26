@@ -1,23 +1,35 @@
 name: Scrape IONOS Website Builder Prices
+
 on:
   schedule:
-    - cron: "5 7 * * *"    # daily at 07:05 UTC
+    # Runs every day at 07:05 UTC (≈08:05 UK winter)
+    - cron: "5 7 * * *"
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # 1. Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Setup Node.js
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install deps
-        run: npm ci
+      # 3. Install dependencies (changed from npm ci → npm install)
+      - name: Install dependencies
+        run: npm install
+
+      # 4. Install Playwright (Chromium only, with dependencies)
       - name: Install Playwright (Chromium)
         run: npx playwright install --with-deps chromium
 
+      # 5. Run the scraper and post results to Google Sheet
       - name: Scrape and post to Google Sheet
         env:
           SHEET_WEBHOOK: ${{ secrets.SHEET_WEBHOOK }}
