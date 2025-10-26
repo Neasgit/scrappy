@@ -2,7 +2,7 @@ name: Scrape IONOS Website Builder Prices
 
 on:
   schedule:
-    - cron: "5 7 * * *"   # 07:05 UTC daily
+    - cron: "5 7 * * *"   # daily at 07:05 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"            # auto-caches node_modules via package-lock.json
+          cache: "npm"
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -33,8 +33,8 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-v1
 
-      - name: Install deps
-        run: npm ci               # use npm ci once you commit package-lock.json
+      - name: Install dependencies
+        run: npm ci
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
@@ -42,6 +42,5 @@ jobs:
       - name: Scrape and post to Google Sheet
         env:
           SHEET_WEBHOOK: ${{ secrets.SHEET_WEBHOOK }}
-          WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}   # new (see Security)
-          DEBUG: "0"                                    # set to "1" to log more
+          WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
         run: npm run scrape
