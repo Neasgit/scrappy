@@ -2,148 +2,88 @@ import { chromium } from "playwright";
 import fetch from "node-fetch";
 
 const TARGET = "https://www.ionos.co.uk/websites/website-builder";
-// Only the three real plans on this page:
 const PLANS = ["Starter", "Plus", "Pro"];
-
-// regex helpers
 const GBP = /£\s*\d+(?:[.,]\d{1,2})?/;
 const PER_MONTH_ALL = /£\s*\d+(?:[.,]\d{1,2})?\s*\/\s*month/gi;
 const INTRO_TERM = /for\s+(\d+)\s+months?/i;
-// explicit renewal line variants, allow some filler before "/month"
-const RENEW_LINE = /(?:Then\s+only|Thereafter|Then)\s+£\s*\d+(?:[.,]\d{1,2})?.{0,40}?\/\s*month/i;
+const RENEW_LINE = /(?:Then\s+only|Thereafter|Then|After\s+promo|After\s+\d+\s+months)\s+£\s*\d+(?:[.,]\d{1,2})?.{0,40}?\/\s*month/i;
 
 function first(re, s) { const m = s.match(re); return m ? m[0] : ""; }
-function firstNum(re, s) { const m = s.match(re); return m ? m[1] : ""; }
-function numericVal(p) {
-  const m = p.match(/£\s*(\d+(?:[.,]\d{1,2})?)/);
-  return m ? parseFloat(m[1].replace(",", ".")) : NaN;
-}
+function numericVal(p) { const m = p.match(/£\s*(\d+(?:[.,]\d{1,2})?)/); return m ? parseFloat(m[1]) : NaN; }
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    locale: "en-GB",
-    timezoneId: "Europe/London",
-    userAgent:
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141 Safari/537.36",
-  });
+  const context = await browser.newContext({ locale:"en-GB", timezoneId:"Europe/London" });
   const page = await context.newPage();
+  await page.goto(TARGET, { waitUntil:"networkidle" });
 
-  console.log("Opening:", TARGET);
-  await page.goto(TARGET, { waitUntil: "networkidle" });
-
-  // Dismiss cookie banners if present
-  for (const label of ["Accept all", "Allow all", "Accept"]) {
+  for (const label of ["Accept all","Allow all","Accept"]) {
     try { await page.locator(`button:has-text("${label}")`).first().click({ timeout: 1500 }); } catch {}
   }
 
-  // Ensure prices are visible
-  await page.locator('text=/£\\s*\\d(?:[.,]\\d{1,2})?\\s*\\/\\s*month/i').first().waitFor({ timeout: 15000 });
-  await page.waitForTimeout(2500); // settle lazy/animated content
+  await page.locator('text=/£\\s*\\d.*\\/\\s*month/i').first().waitFor({ timeout:15000 });
+  await page.waitForTimeout(2000);
 
   const rows = [];
-
   for (const plan of PLANS) {
-    // Find the plan heading with simple CSS + hasText
-    const heading = page.locator('h1,h2,h3,h4').filter({ hasText: new RegExp(`\\b${plan}\\b`, "i") }).first();
-    if (!(await heading.count())) {
-      console.warn(`No heading found for ${plan}`);
-      continue;
-    }
+    const heading = page.locator('h1,h2,h3,h4').filter({ hasText:new RegExp(`\\b${plan}\\b`, "i") }).first();
+    if (!(await heading.count())) continue;
 
-    // Climb to the tightest container that looks like the plan card
-    const containerText = await heading.evaluate((el) => {
-      function txt(node) { return (node.innerText || "").replace(/\s+/g, " ").trim(); }
-      let node = el;
-      let best = "";
-      let bestScore = -1;
-      for (let i = 0; i < 8 && node; i++) {
-        const t = txt(node);
-        if (t) {
-          const poundCount = (t.match(/£\s*\d/g) || []).length;
-          const hasMonth = /month/i.test(t);
-          const hasCart = /Add to cart/i.test(t);
-          const score = (hasMonth ? 3 : 0) + (hasCart ? 2 : 0) + Math.min(poundCount, 3) - (t.length > 6000 ? 5 : 0);
-          if (score > bestScore) { best = t; bestScore = score; }
+    const containerText = await heading.evaluate(el=>{
+      const txt=n=> (n.innerText||"").replace(/\s+/g," ").trim();
+      let node=el,best="",bestScore=-1;
+      for(let i=0;i<8&&node;i++){
+        const t=txt(node);
+        if(t){
+          const pound=(t.match(/£\s*\d/g)||[]).length,hasMonth=/month/i.test(t),hasCart=/Add to cart/i.test(t);
+          const s=(hasMonth?3:0)+(hasCart?2:0)+Math.min(pound,3)-(t.length>6000?5:0);
+          if(s>bestScore){best=t;bestScore=s;}
         }
-        node = node.parentElement;
+        node=node.parentElement;
       }
       return best;
     });
+    if(!containerText) continue;
 
-    if (!containerText) {
-      console.warn(`No container text for ${plan}`);
-      continue;
+    const priceMatches=[...containerText.matchAll(PER_MONTH_ALL)].map(m=>({value:m[0].replace(/\s+/g," "),index:m.index}));
+    const termMatch=containerText.match(INTRO_TERM);
+    const duration=termMatch?`${termMatch[1]} months`:"";
+
+    let intro="",standard="";
+    if(termMatch&&priceMatches.length){
+      const before=priceMatches.filter(p=>p.index<=termMatch.index);
+      if(before.length){ intro=before.at(-1).value.replace("/month","per month"); }
+    }
+    const renewLine=first(RENEW_LINE,containerText);
+    standard=(renewLine.match(GBP)?.[0]||"").replace(/\s+/g,"");
+    if(standard) standard+=" per month";
+
+    if(!intro&&priceMatches.length){
+      const sorted=[...priceMatches].sort((a,b)=>numericVal(a.value)-numericVal(b.value));
+      if(sorted.length>=2){ intro=sorted[0].value.replace("/month","per month"); standard=sorted.at(-1).value.replace("/month","per month"); }
+      else intro=sorted[0].value.replace("/month","per month");
+    } else if(intro&&!standard&&priceMatches.length>=2){
+      const others=priceMatches.map(p=>p.value).filter(v=>v!==intro);
+      if(others.length) standard=others.sort((a,b)=>numericVal(a)-numericVal(b)).at(-1).replace("/month","per month");
     }
 
-    // Collect monthly prices within this plan’s container
-    const priceMatches = [];
-    let m;
-    while ((m = PER_MONTH_ALL.exec(containerText)) !== null) {
-      priceMatches.push({ value: m[0].replace(/\s+/g, ""), index: m.index });
-    }
-
-    const termMatch = containerText.match(INTRO_TERM);
-    const duration = termMatch ? termMatch[1] : ""; // months
-
-    // Introductory Offer (promo): pick price immediately BEFORE "for N months"
-    let introductoryOffer = "";
-    if (termMatch && priceMatches.length) {
-      const before = priceMatches.filter(p => p.index <= termMatch.index);
-      if (before.length) {
-        const nearest = before.reduce((a, b) => (b.index > a.index ? b : a));
-        introductoryOffer = nearest.value; // e.g., "£6/month"
-      }
-    }
-
-    // Standard Price (renewal): use explicit "Then only £X/month" if present
-    const renewLine = first(RENEW_LINE, containerText);
-    let standardPrice = (renewLine.match(GBP)?.[0] || "").replace(/\s+/g, "");
-
-    // Fallbacks if explicit renew not found
-    if (!introductoryOffer && priceMatches.length) {
-      // No term nearby → smaller price = intro; larger = standard (if 2+)
-      const sorted = [...priceMatches].sort((a, b) => numericVal(a.value) - numericVal(b.value));
-      if (sorted.length >= 2) {
-        introductoryOffer = sorted[0].value;
-        standardPrice = sorted[sorted.length - 1].value;
-      } else {
-        introductoryOffer = sorted[0].value;
-      }
-    } else if (introductoryOffer && !standardPrice && priceMatches.length >= 2) {
-      // We have an intro; pick a different price as standard (prefer larger)
-      const others = priceMatches.map(p => p.value).filter(v => v !== introductoryOffer);
-      if (others.length) standardPrice = others.sort((a,b) => numericVal(a)-numericVal(b))[others.length - 1];
-    }
-
-    rows.push({
-      plan,
-      introductoryOffer, // "£6/month"
-      duration,          // "6"
-      standardPrice,     // "£10" (we’ll leave off "/month" here to match your header wording)
-      src: TARGET
-    });
+    rows.push({ plan, introductoryOffer:intro, duration, standardPrice:standard, src:TARGET });
   }
 
   await browser.close();
+  console.log("Extracted rows:", JSON.stringify(rows,null,2));
 
-  console.log("Extracted rows:");
-  console.log(JSON.stringify(rows, null, 2));
+  const valid=rows.filter(r=>r.introductoryOffer||r.standardPrice);
+  if(!valid.length){ console.error("No prices parsed."); process.exit(2); }
 
-  const valid = rows.filter(r => r.introductoryOffer || r.standardPrice);
-  if (!valid.length) {
-    console.error("No prices parsed — possible markup/text change.");
-    process.exit(2);
-  }
+  const hook=process.env.SHEET_WEBHOOK;
+  const token=process.env.WEBHOOK_TOKEN;
+  if(!hook||!token){ console.error("Missing SHEET_WEBHOOK or WEBHOOK_TOKEN."); process.exit(3); }
 
-  const hook = process.env.SHEET_WEBHOOK;
-  if (!hook) { console.error("Missing SHEET_WEBHOOK env var."); process.exit(3); }
-
-  console.log(`Sending ${valid.length} rows to Google Sheet…`);
-  const res = await fetch(hook, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(valid),
+  const res=await fetch(`${hook}?token=${encodeURIComponent(token)}`,{
+    method:"POST",
+    headers:{ "Content-Type":"application/json", "x-auth":token },
+    body:JSON.stringify(valid)
   });
-  console.log("Sheet:", await res.text());
+  console.log("Sheet:",await res.text());
 })();
