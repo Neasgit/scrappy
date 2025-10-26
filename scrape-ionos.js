@@ -8,6 +8,19 @@ const PER_MONTH_ALL = /£\s*\d+(?:[.,]\d{1,2})?\s*\/\s*month/gi;
 const INTRO_TERM = /for\s+(\d+)\s+months?/i;
 const RENEW_LINE = /(?:Then\s+only|Thereafter|Then|After\s+promo|After\s+\d+\s+months)\s+£\s*\d+(?:[.,]\d{1,2})?.{0,40}?\/\s*month/i;
 
+const fmtMoney = (s) => {
+  if (!s) return "";
+  // normalize spaces around the pound and before "per month"
+  // examples in → "£ 6/month", "£10/month", "£ 10 per month"
+  let t = s.replace(/\s+/g, " ").trim();
+  // collapse "£ 6" → "£6"
+  t = t.replace(/£\s+(\d)/g, "£$1");
+  // ensure " per month" spacing
+  t = t.replace(/\s*\/\s*month/i, " per month");
+  t = t.replace(/(£\d+(?:[.,]\d{1,2})?)(?!\sper month)/i, "$1");
+  return t;
+};
+
 function first(re, s) { const m = s.match(re); return m ? m[0] : ""; }
 function numericVal(p) { const m = p.match(/£\s*(\d+(?:[.,]\d{1,2})?)/); return m ? parseFloat(m[1]) : NaN; }
 
@@ -49,28 +62,28 @@ function numericVal(p) { const m = p.match(/£\s*(\d+(?:[.,]\d{1,2})?)/); return
     const termMatch=containerText.match(INTRO_TERM);
     const duration=termMatch?`${termMatch[1]} months`:"";
 
-    let intro="",standard="";
+    let introductoryOffer="", standardPrice="";
     if(termMatch&&priceMatches.length){
       const before=priceMatches.filter(p=>p.index<=termMatch.index);
-      if(before.length){ intro=before.at(-1).value.replace("/month","per month"); }
+      if(before.length){ introductoryOffer = fmtMoney(before.at(-1).value); }
     }
+
     const renewLine=first(RENEW_LINE,containerText);
-    standard=(renewLine.match(GBP)?.[0]||"").replace(/\s+/g,"");
-    if(standard) standard+=" per month";
+    const renewRaw=(renewLine.match(GBP)?.[0]||"");
+    if (renewRaw) standardPrice = fmtMoney(renewRaw + " per month");
 
-    if(!intro&&priceMatches.length){
+    if(!introductoryOffer&&priceMatches.length){
       const sorted=[...priceMatches].sort((a,b)=>numericVal(a.value)-numericVal(b.value));
-      if(sorted.length>=2){ intro=sorted[0].value.replace("/month","per month"); standard=sorted.at(-1).value.replace("/month","per month"); }
-      else intro=sorted[0].value.replace("/month","per month");
-    } else if(intro&&!standard&&priceMatches.length>=2){
-      const others=priceMatches.map(p=>p.value).filter(v=>v!==intro);
-      if(others.length) standard=others.sort((a,b)=>numericVal(a)-numericVal(b)).at(-1).replace("/month","per month");
+      if(sorted.length>=2){ introductoryOffer=fmtMoney(sorted[0].value); standardPrice=fmtMoney(sorted.at(-1).value); }
+      else introductoryOffer=fmtMoney(sorted[0].value);
+    } else if(introductoryOffer&&!standardPrice&&priceMatches.length>=2){
+      const others=priceMatches.map(p=>p.value).filter(v=>fmtMoney(v)!==introductoryOffer);
+      if(others.length) standardPrice=fmtMoney(others.sort((a,b)=>numericVal(a)-numericVal(b)).at(-1));
     }
 
-    rows.push({ plan, introductoryOffer:intro, duration, standardPrice:standard, src:TARGET });
+    rows.push({ plan, introductoryOffer, duration, standardPrice, src:TARGET });
   }
 
-  await browser.close();
   console.log("Extracted rows:", JSON.stringify(rows,null,2));
 
   const valid=rows.filter(r=>r.introductoryOffer||r.standardPrice);
