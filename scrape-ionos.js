@@ -2,13 +2,14 @@ import { chromium } from "playwright";
 import fetch from "node-fetch";
 
 const TARGET = "https://www.ionos.co.uk/websites/website-builder";
-const PLANS = ["Starter", "Plus", "Pro", "Expert"];
+// Only the three real plans on this page:
+const PLANS = ["Starter", "Plus", "Pro"];
 
 // regex helpers
 const GBP = /£\s*\d+(?:[.,]\d{1,2})?/;
 const PER_MONTH_ALL = /£\s*\d+(?:[.,]\d{1,2})?\s*\/\s*month/gi;
-const INTRO_TERM = /for\s+(\d+)\s+months/i;
-// allow variants: "Then only £X/month", "Thereafter £X/month", sometimes with extra words before "/month"
+const INTRO_TERM = /for\s+(\d+)\s+months?/i;
+// explicit renewal line variants, allow some filler before "/month"
 const RENEW_LINE = /(?:Then\s+only|Thereafter|Then)\s+£\s*\d+(?:[.,]\d{1,2})?.{0,40}?\/\s*month/i;
 
 function first(re, s) { const m = s.match(re); return m ? m[0] : ""; }
@@ -40,20 +41,17 @@ function numericVal(p) {
   await page.locator('text=/£\\s*\\d(?:[.,]\\d{1,2})?\\s*\\/\\s*month/i').first().waitFor({ timeout: 15000 });
   await page.waitForTimeout(2500); // settle lazy/animated content
 
-  const results = [];
+  const rows = [];
 
   for (const plan of PLANS) {
-    // Find the plan heading (no XPath; use CSS + hasText)
-    const heading = page.locator('h1,h2,h3,h4').filter({
-      hasText: new RegExp(`\\b${plan}\\b`, "i"),
-    }).first();
-
+    // Find the plan heading with simple CSS + hasText
+    const heading = page.locator('h1,h2,h3,h4').filter({ hasText: new RegExp(`\\b${plan}\\b`, "i") }).first();
     if (!(await heading.count())) {
       console.warn(`No heading found for ${plan}`);
       continue;
     }
 
-    // Climb ancestors to the tightest container that looks like the plan card
+    // Climb to the tightest container that looks like the plan card
     const containerText = await heading.evaluate((el) => {
       function txt(node) { return (node.innerText || "").replace(/\s+/g, " ").trim(); }
       let node = el;
@@ -65,7 +63,6 @@ function numericVal(p) {
           const poundCount = (t.match(/£\s*\d/g) || []).length;
           const hasMonth = /month/i.test(t);
           const hasCart = /Add to cart/i.test(t);
-          // Prefer compact sections with 1–3 prices + "month" + "Add to cart"; penalise massive blobs
           const score = (hasMonth ? 3 : 0) + (hasCart ? 2 : 0) + Math.min(poundCount, 3) - (t.length > 6000 ? 5 : 0);
           if (score > bestScore) { best = t; bestScore = score; }
         }
@@ -87,51 +84,53 @@ function numericVal(p) {
     }
 
     const termMatch = containerText.match(INTRO_TERM);
-    const term = termMatch ? termMatch[1] : "";
+    const duration = termMatch ? termMatch[1] : ""; // months
 
-    let intro = "";
-    let renew = "";
-
+    // Introductory Offer (promo): pick price immediately BEFORE "for N months"
+    let introductoryOffer = "";
     if (termMatch && priceMatches.length) {
-      // Choose the monthly price immediately BEFORE "for N months"
-      const termIndex = termMatch.index;
-      const before = priceMatches.filter(p => p.index <= termIndex);
+      const before = priceMatches.filter(p => p.index <= termMatch.index);
       if (before.length) {
         const nearest = before.reduce((a, b) => (b.index > a.index ? b : a));
-        intro = nearest.value;
+        introductoryOffer = nearest.value; // e.g., "£6/month"
       }
     }
 
-    // Renewal: explicit “Then only £X/month” wins
+    // Standard Price (renewal): use explicit "Then only £X/month" if present
     const renewLine = first(RENEW_LINE, containerText);
-    const renewFromLine = (renewLine.match(GBP)?.[0] || "").replace(/\s+/g, "");
+    let standardPrice = (renewLine.match(GBP)?.[0] || "").replace(/\s+/g, "");
 
-    if (!intro && priceMatches.length) {
-      // No term nearby → smaller price = intro, larger = renew
+    // Fallbacks if explicit renew not found
+    if (!introductoryOffer && priceMatches.length) {
+      // No term nearby → smaller price = intro; larger = standard (if 2+)
       const sorted = [...priceMatches].sort((a, b) => numericVal(a.value) - numericVal(b.value));
       if (sorted.length >= 2) {
-        intro = sorted[0].value;
-        renew = sorted[sorted.length - 1].value;
+        introductoryOffer = sorted[0].value;
+        standardPrice = sorted[sorted.length - 1].value;
       } else {
-        intro = sorted[0].value;
+        introductoryOffer = sorted[0].value;
       }
-    } else if (intro && priceMatches.length >= 2 && !renewLine) {
-      // We have an intro → pick a different price as renew (prefer larger)
-      const others = priceMatches.map(p => p.value).filter(v => v !== intro);
-      if (others.length) renew = others.sort((a,b) => numericVal(a)-numericVal(b))[others.length - 1];
+    } else if (introductoryOffer && !standardPrice && priceMatches.length >= 2) {
+      // We have an intro; pick a different price as standard (prefer larger)
+      const others = priceMatches.map(p => p.value).filter(v => v !== introductoryOffer);
+      if (others.length) standardPrice = others.sort((a,b) => numericVal(a)-numericVal(b))[others.length - 1];
     }
 
-    if (renewFromLine) renew = renewFromLine;
-
-    results.push({ plan, intro, term, renew, period: "/month", src: TARGET });
+    rows.push({
+      plan,
+      introductoryOffer, // "£6/month"
+      duration,          // "6"
+      standardPrice,     // "£10" (we’ll leave off "/month" here to match your header wording)
+      src: TARGET
+    });
   }
 
   await browser.close();
 
   console.log("Extracted rows:");
-  console.log(JSON.stringify(results, null, 2));
+  console.log(JSON.stringify(rows, null, 2));
 
-  const valid = results.filter(r => r.intro || r.renew);
+  const valid = rows.filter(r => r.introductoryOffer || r.standardPrice);
   if (!valid.length) {
     console.error("No prices parsed — possible markup/text change.");
     process.exit(2);
